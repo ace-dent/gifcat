@@ -30,11 +30,35 @@
 #define MAX_FILE_SIZE   (10 * 1024 * 1024)
 #define DEFAULT_DELAY   50
 
-static unsigned char *first_pal = NULL;
+// Global resources for cleanup
+static FILE        *outfp         = NULL;
+static int         *g_disp_arr    = NULL;
+static bool        *g_local_arr   = NULL;
+static int         *g_pixel_arr   = NULL;
+static unsigned char *first_pal   = NULL;
 static size_t        first_pal_size = 0;
-static uint16_t      first_width = 0, first_height = 0;
-static const char   *current_file = NULL;
-static int          first_pixel_index = 0;
+static uint16_t      first_width   = 0;
+static uint16_t      first_height  = 0;
+static const char   *current_file  = NULL;
+static int           first_pixel_index = 0;
+
+// Cleanup function registered with atexit
+static void cleanup_resources(void) {
+    if (outfp) {
+        fflush(outfp);
+        if (ferror(outfp)) perror("flushing output");
+        fclose(outfp);
+        outfp = NULL;
+    }
+    free(first_pal);
+    first_pal = NULL;
+    free(g_disp_arr);
+    g_disp_arr = NULL;
+    free(g_local_arr);
+    g_local_arr = NULL;
+    free(g_pixel_arr);
+    g_pixel_arr = NULL;
+}
 
 // Read GIF into memory and validate header
 static unsigned char* load_file(const char *path, size_t *out_size,
@@ -136,21 +160,31 @@ static int read_lzw_code(const unsigned char *data, size_t len,
 }
 
 int main(int argc, char **argv) {
+    int ret = 0;
     if (argc < 3) {
         fprintf(stderr, "Usage: %s output.gif [-fallback-delay CS] frame0.gif [frame1.gif ...]\n", argv[0]);
         return 1;
     }
-    FILE *out = fopen(argv[1], "wb");
-    if (!out) { perror("fopen"); return 1; }
+    // Register cleanup
+    atexit(cleanup_resources);
+
+    outfp = fopen(argv[1], "wb");
+    if (!outfp) {
+        perror("fopen");
+        return 1;
+    }
 
     int fallback_delay = DEFAULT_DELAY;
-    // Track per-frame disposal, palette usage, and first-pixel index for dummy lookup
     int max_frames = argc - 2;
-    int *disp_arr = calloc(max_frames, sizeof(int));
-    bool *local_arr = calloc(max_frames, sizeof(bool));
-    int *pixel_arr = calloc(max_frames, sizeof(int));
-    int frame_index = 0;
+    g_disp_arr  = calloc(max_frames, sizeof(int));
+    g_local_arr = calloc(max_frames, sizeof(bool));
+    g_pixel_arr = calloc(max_frames, sizeof(int));
+    if (!g_disp_arr || !g_local_arr || !g_pixel_arr) {
+        fprintf(stderr, "OOM allocating frame arrays\n");
+        return 1;
+    }
 
+    int frame_index = 0;
     for (int i = 2; i < argc; i++) {
         const char *path = argv[i];
         if (strcmp(path, "-fallback-delay") == 0) {
@@ -161,42 +195,35 @@ int main(int argc, char **argv) {
             fallback_delay = atoi(argv[++i]);
             continue;
         }
-
         current_file = path;
-        off_t before = ftello(out);
+        off_t before = ftello(outfp);
 
-                // Dummy frame insertion: use last non-disposed (disp==1 or disp==0) frame's pixel
         if (strcmp(path, "dummy") == 0) {
             int target = frame_index - 1;
-            while (target >= 0 && disp_arr[target] != 1 && disp_arr[target] != 0) {
+            while (target >= 0 && g_disp_arr[target] != 1 && g_disp_arr[target] != 0) {
                 target--;
             }
             if (target < 0) target = 0;
-            int color_index = pixel_arr[target];
-            bool need_local = local_arr[target];
-            // Build GCE with disposal=1 and default delay
+            int color_index = g_pixel_arr[target];
+            bool need_local = g_local_arr[target];
             unsigned char gce[8] = {0x21,0xF9,0x04,0x04,(unsigned char)fallback_delay,0,0,0};
             if (need_local) { gce[3] |= 0x01; gce[6] = 0; }
-            fwrite(gce, 1, 8, out);
-            // Descriptor at (0,0) size 1×1, local table flag if needed
+            fwrite(gce, 1, 8, outfp);
             unsigned char desc[10] = {0x2C,0,0,0,0,1,0,1,0,(unsigned char)(need_local?0x80:0x00)};
-            fwrite(desc, 1, 10, out);
-            // Optional 2-entry local palette: transparent, then the color
+            fwrite(desc, 1, 10, outfp);
             if (need_local) {
                 unsigned char pal2[6] = {0,0,0,
                     first_pal[3*color_index], first_pal[3*color_index+1], first_pal[3*color_index+2]};
-                fwrite(pal2, 1, 6, out);
+                fwrite(pal2, 1, 6, outfp);
                 color_index = 1;
             }
-            // LZW: clear, pixel code, EOI
             unsigned char lzw[5] = {2,2,0x4C,(unsigned char)color_index,0};
-            fwrite(lzw, 1, 5, out);
+            fwrite(lzw, 1, 5, outfp);
             fprintf(stderr, "Frame %d: 15 bytes added, disposal=1, delay=%dcs, 1x1px 'dummy'\n", frame_index, fallback_delay);
-            // Advance frame counter
             frame_index++;
             continue;
         }
-        // Load real frame
+
         size_t buf_size;
         uint16_t w, h;
         unsigned char *buf = load_file(path, &buf_size, &w, &h);
@@ -211,35 +238,31 @@ int main(int argc, char **argv) {
             return 1;
         }
 
-        // Extract/write palette and header for first frame
         size_t pal_size;
         unsigned char *pal = extract_palette(buf, buf_size, &pal_size);
         size_t hdr_end = (i == 2 ? 13 + pal_size : 13 + first_pal_size);
         if (i == 2) {
-            first_pal      = pal;
+            first_pal = pal;
             first_pal_size = pal_size;
-            fwrite(buf, 1, hdr_end, out);
-            ensure_loop(out, buf, hdr_end, buf_size);
+            fwrite(buf, 1, hdr_end, outfp);
+            ensure_loop(outfp, buf, hdr_end, buf_size);
         }
 
-        // Locate Image Descriptor
         bool found = false;
         for (size_t j = hdr_end; j + 1 < buf_size; j++) {
             if (buf[j] == 0x2C) { found = true; break; }
         }
         if (!found) {
             fprintf(stderr, "%s: no image descriptor\n", path);
-            if (i > 2) free(pal);
             free(buf);
             return 1;
         }
 
-        // Parse Graphic Control Extension
         size_t p = hdr_end;
-        bool   has_gce  = false;
-        size_t gce_pos  = 0;
+        bool has_gce = false;
+        size_t gce_pos = 0;
         while (p + 1 < buf_size) {
-            if (buf[p]==0x21 && buf[p+1]==0xF9) { has_gce=true; gce_pos=p; break; }
+            if (buf[p]==0x21 && buf[p+1]==0xF9) { has_gce = true; gce_pos = p; break; }
             if (buf[p]==0x2C) break;
             if (buf[p]==0x21) {
                 p += 2;
@@ -257,7 +280,6 @@ int main(int argc, char **argv) {
             if (!delay) delay = fallback_delay;
         }
 
-        // Decode first frame pixel index for dummy reference
         if (i == 2 && has_gce) {
             int code_size = bs;
             int bit_pos   = 0;
@@ -278,7 +300,6 @@ int main(int argc, char **argv) {
             free(data);
         }
 
-        // Write updated GCE
         unsigned char gce2[8];
         gce2[0] = 0x21;
         gce2[1] = 0xF9;
@@ -288,25 +309,19 @@ int main(int argc, char **argv) {
         gce2[5] = (delay >> 8) & 0xFF;
         gce2[6] = has_gce ? buf[gce_pos+6] : 0;
         gce2[7] = has_gce ? buf[gce_pos+7] : 0;
-        fwrite(gce2, 1, 8, out);
+        fwrite(gce2, 1, 8, outfp);
 
-        // Advance past original GCE blocks
         if (has_gce) {
             size_t q = gce_pos + 2;
             unsigned char sz = buf[q++];
-            while (sz) {
-                q += sz;
-                sz = buf[q++];
-            }
+            while (sz) { q += sz; sz = buf[q++]; }
             p = q;
         }
 
-        // Write Image Descriptor
-        fwrite(buf + p, 1, 9, out);
+        fwrite(buf + p, 1, 9, outfp);
         unsigned char idp = buf[p+9];
         p += 10;
 
-        // Handle local palette if needed
         bool used_local = false;
         size_t lb = 0;
         unsigned char op = idp;
@@ -322,35 +337,33 @@ int main(int argc, char **argv) {
                 int lg = 0;
                 while ((1 << (lg + 1)) <= ents) lg++;
                 op = (op & ~0x07) | ((lg ? lg-1 : 0) & 0x07) | 0x80;
-                fwrite(&op, 1, 1, out);
-                fwrite(pal, 1, cs, out);
+                fwrite(&op, 1, 1, outfp);
+                fwrite(pal, 1, cs, outfp);
             } else {
-                fwrite(&op, 1, 1, out);
+                fwrite(&op, 1, 1, outfp);
             }
         } else {
-            fwrite(&op, 1, 1, out);
+            fwrite(&op, 1, 1, outfp);
         }
 
-        // Skip any input local table
         if (idp & 0x80) {
             int entries = 1 << ((idp & 0x07) + 1);
             p += 3 * entries;
         }
 
-        // LZW image data
         unsigned char lzw_min = buf[p++];
-        fwrite(&lzw_min, 1, 1, out);
-        write_blocks(out, buf, p, buf_size);
-        // Record this frame for future dummy lookups
-        disp_arr[frame_index] = disp;
-        local_arr[frame_index] = used_local;
-        pixel_arr[frame_index] = first_pixel_index;
+        fwrite(&lzw_min, 1, 1, outfp);
+        write_blocks(outfp, buf, p, buf_size);
+
+        g_disp_arr[frame_index]  = disp;
+        g_local_arr[frame_index] = used_local;
+        g_pixel_arr[frame_index] = first_pixel_index;
         frame_index++;
 
         if (i > 2) free(pal);
         free(buf);
 
-        off_t after = ftello(out);
+        off_t after = ftello(outfp);
         fprintf(stderr, "Frame %d: %lld bytes added, disposal=%d, delay=%ucs", frame_index-1, (long long)(after-before), disp, delay);
         if (used_local) fprintf(stderr, ", local palette (%zu bytes)", lb);
         fprintf(stderr, "\n");
@@ -358,13 +371,8 @@ int main(int argc, char **argv) {
 
     // Write GIF trailer
     unsigned char term = 0x3B;
-    fwrite(&term, 1, 1, out);
-    fflush(out);
-    if (ferror(out)) perror("writing trailer");
-    fclose(out);
-    free(first_pal);
-    free(disp_arr);
-    free(local_arr);
-    free(pixel_arr);
-    return 0;
+    fwrite(&term, 1, 1, outfp);
+    fflush(outfp);
+    if (ferror(outfp)) perror("writing trailer");
+    return ret;
 }
