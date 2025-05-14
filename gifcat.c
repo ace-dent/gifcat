@@ -43,9 +43,9 @@ static const int    DEFAULT_DELAY_CS       = 50;
 // GIF header signature constants: 'GIF87a' and 'GIF89a'
 // Section 17: Signature (3 bytes) + Version (3 bytes)
 // -----------------------------------------------------------------------------
-static const size_t GIF_SIG_LEN            = 6;
-static const unsigned char GIF87a_SIG[6]   = {'G','I','F','8','7','a'};
-static const unsigned char GIF89a_SIG[6]   = {'G','I','F','8','9','a'};
+static const size_t GIF_SIG_LEN = 6;
+static const char GIF87a_SIG[6] = "GIF87a";
+static const char GIF89a_SIG[6] = "GIF89a";
 
 // -----------------------------------------------------------------------------
 // Block introducers and labels
@@ -90,6 +90,13 @@ static const unsigned char COLOR_TABLE_SIZE_MASK       = 0x07;
 // -----------------------------------------------------------------------------
 static const unsigned char LZW_MIN_CODE_SIZE_DUMMY     = 2;
 static const unsigned char DUMMY_LZW_DATA[5]           = {LZW_MIN_CODE_SIZE_DUMMY, 2, 0x4C, 0, 0};
+/*
+ TODO: Make sure we are using the minimal code length (bit depth) based on
+ actual Global Table Palette entries. e.g. index 1,2 = 1bpp; index 3,4 =2bpp, etc.
+ We should be reading the first pixel of the last non-disposal frame (disposal=0 or 1),
+ prior to inserting the dummy frame.
+ Check for issues requiring a 1bit transparent local color table.
+*/
 
 // Globals for output and resource tracking
 static FILE           *outfp                   = NULL;
@@ -155,6 +162,10 @@ static unsigned char* load_file(const char *path, size_t *out_size,
     *out_size = (size_t)sz;
     return buf;
 }
+/*
+ TODO: We should validate for multi-frame GIF input.
+ Warn the user and only import the first frame present.
+*/
 
 // Write LZW sub-blocks until zero-length terminator
 static void write_blocks(FILE *out, const unsigned char *buf,
@@ -178,6 +189,7 @@ static void write_blocks(FILE *out, const unsigned char *buf,
 static void ensure_loop(FILE *out, const unsigned char *buf,
                         size_t start, size_t end) {
     size_t pos = start;
+    // Scan existing extensions
     while (pos + APP_EXT_BLOCK_SIZE < end) {
         if (buf[pos]==EXT_INTRODUCER && buf[pos+1]==APPLICATION_EXTENSION_LABEL &&
             buf[pos+2]==APP_EXT_BLOCK_SIZE &&
@@ -190,12 +202,16 @@ static void ensure_loop(FILE *out, const unsigned char *buf,
             while (sz) { pos += sz; sz = buf[pos++]; }
         } else pos++;
     }
-    unsigned char ext[] = {
-        EXT_INTRODUCER, APPLICATION_EXTENSION_LABEL, APP_EXT_BLOCK_SIZE,
-        'N','E','T','S','C','A','P','E','2','.','0',
-        NETSCAPE_LOOP_SUBBLOCK_SIZE, NETSCAPE_LOOP_SUBBLOCK_ID, 0x00, 0x00, 0x00
-    };
-    fwrite(ext, 1, sizeof(ext), out);
+    // Write Netscape Application Extension
+    unsigned char header[] = {EXT_INTRODUCER, APPLICATION_EXTENSION_LABEL, APP_EXT_BLOCK_SIZE};
+    fwrite(header, 1, sizeof(header), out);
+    fwrite((unsigned char*)NETSCAPE2_HDR, 1, APP_EXT_BLOCK_SIZE, out);
+    unsigned char loop_ext[] = {NETSCAPE_LOOP_SUBBLOCK_SIZE, NETSCAPE_LOOP_SUBBLOCK_ID,
+                0x00, // loop count LSB=0 for infinite
+                0x00, // loop count MSB
+                0x00  // block terminator
+            };
+    fwrite(loop_ext, 1, sizeof(loop_ext), out);
 }
 
 // Extract global color table if present
@@ -418,14 +434,13 @@ int main(int argc, char **argv) {
         free(buf);
 
         off_t after = ftello(outfp);
-        fprintf(stderr, "Frame %d: %lld bytes added, disposal=%d, delay=%ucs%s\n",
+        fprintf(stderr, "Frame %d: %lld bytes added, disposal=%d, delay=%ucs%s",
                 frame_index-1,
                 (long long)(after-before),
                 disposal,
                 delay,
-                used_local_palette ? ", local palette (": "");
-        if (used_local_palette) fprintf(stderr, "%zu bytes)", local_palette_bytes);
-        if (used_local_palette) fprintf(stderr, "\n");
+                used_local_palette ? ", local palette (": "\n");
+        if (used_local_palette) fprintf(stderr, "%zu bytes)\n", local_palette_bytes);
     }
 
     // Write GIF trailer
@@ -434,3 +449,9 @@ int main(int argc, char **argv) {
     if (ferror(outfp)) perror("writing trailer");
     return ret;
 }
+
+/*
+ TODO: Future Optimizations:
+ - Check if all colors are required in a local color table. Remove redundant entries.
+ - Scan and concatenate any comment blocks, to reduce some overhead.
+*/
