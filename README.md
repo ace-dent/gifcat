@@ -1,10 +1,12 @@
-# gifcat 🅰️😸🅱️➡️🆎
+# gifcat
 
-Concatenate multiple single-frame GIFs into a single looping animation.
+Concatenate multiple single-frame GIFs into a single looping animation.  
 
----
+🅰️😸🅱️➡️🆎
 
-🚧 **Alpha / Experimental** 🚧
+<br>
+
+## 🚧 **Alpha / Experimental** 🚧
 _This project is in an early alpha state. Use at your own risk—functionality may be incomplete, unsafe, or incorrect._
 
 ---
@@ -33,13 +35,17 @@ gifcat output.gif [-fallback-delay CS] frame0.gif [frame1.gif ...]
 
 ## 🛠️ Building
 
-This is a standalone C program. To build:
+This is a standalone C program. Ensure you have a C compiler (e.g., `gcc` or `clang`) and standard libraries.To build:
 
 ```sh
-gcc -std=c11 -O2 -o gifcat gifcat.c
+gcc -std=c11 -o gifcat gifcat.c
 ```
 
-Ensure you have a C compiler (e.g., `gcc` or `clang`) and standard libraries.
+or 
+
+```sh
+clang -o gifcat gifcat.c
+```
 
 ## ⚠️ Disclaimer
 
