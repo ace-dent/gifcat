@@ -452,6 +452,7 @@ int main(int argc, char **argv) {
 
 /*
  TODO: Future Optimizations:
+ - Ensure file only ever has zero or one NETSCAPE (loop) App Extension, that is correctly positioned.
  - Check if all colors are required in a local color table. Remove redundant entries.
- - Scan and concatenate any comment blocks, to reduce some overhead.
+ - Scan and concatenate any comment blocks, to reduce some overhead. Optionally remove all comments.
 */
