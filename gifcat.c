@@ -393,32 +393,45 @@ int main(int argc, char **argv) {
         bool used_local_palette = false;
         size_t local_palette_bytes = 0;
         unsigned char packed_fields = descriptor_byte;
-        if (i > 2 && first_palette_size) {
-            size_t cs;
-            unsigned char *cp = extract_palette(buf, buf_size, &cs);
-            bool diff = (cs != first_palette_size) || memcmp(cp, first_palette, first_palette_size);
-            free(cp);
-            if (diff) {
-                used_local_palette = true;
-                local_palette_bytes = cs;
-                int entries = cs / 3;
-                int lg = 0;
-                while ((1 << (lg + 1)) <= entries) lg++;
-                packed_fields = (packed_fields & ~COLOR_TABLE_SIZE_MASK)
-                              | ((lg ? lg-1 : 0) & COLOR_TABLE_SIZE_MASK)
-                              | LOCAL_PALETTE_FLAG;
-                fwrite(&packed_fields, 1, 1, outfp);
-                fwrite(palette, 1, cs, outfp);
-            } else {
-                fwrite(&packed_fields, 1, 1, outfp);
-            }
-        } else {
-            fwrite(&packed_fields, 1, 1, outfp);
-        }
 
+        // If the original frame has a local table, compare its entries (ignoring trailing zeros) to the global palette
         if (descriptor_byte & LOCAL_PALETTE_FLAG) {
-            int entries = 1 << ((descriptor_byte & COLOR_TABLE_SIZE_MASK) + 1);
-            p += 3 * entries;
+            int table_size = 1 << ((descriptor_byte & COLOR_TABLE_SIZE_MASK) + 1);
+            size_t palette_bytes = 3 * table_size;
+            unsigned char *frame_palette = buf + p;
+
+            // Trim trailing 0x00 triplets
+            size_t entries = table_size;
+            while (entries > 0) {
+                size_t idx = entries - 1;
+                size_t base = idx * 3;
+                if (frame_palette[base] || frame_palette[base + 1] || frame_palette[base + 2]) break;
+                entries--;
+            }
+            size_t effective_bytes = entries * 3;
+
+            // Compare to global palette
+            bool match = (first_palette_size >= effective_bytes);
+            for (size_t j = 0; match && j < effective_bytes; j++) {
+                if (frame_palette[j] != first_palette[j]) match = false;
+            }
+
+            if (match) {
+                // Drop local palette flag
+                packed_fields &= ~LOCAL_PALETTE_FLAG;
+                fwrite(&packed_fields, 1, 1, outfp);
+            } else {
+                // Keep local palette
+                used_local_palette = true;
+                local_palette_bytes = palette_bytes;
+                fwrite(&packed_fields, 1, 1, outfp);
+                fwrite(frame_palette, 1, local_palette_bytes, outfp);
+            }
+
+            p += palette_bytes;
+        } else {
+            // No local palette: write packed fields as-is
+            fwrite(&packed_fields, 1, 1, outfp);
         }
 
         unsigned char lzw_min = buf[p++];
@@ -439,7 +452,7 @@ int main(int argc, char **argv) {
                 (long long)(after-before),
                 disposal,
                 delay,
-                used_local_palette ? ", local palette (": "\n");
+                used_local_palette ? ", local palette (" : "\n");
         if (used_local_palette) fprintf(stderr, "%zu bytes)\n", local_palette_bytes);
     }
 
