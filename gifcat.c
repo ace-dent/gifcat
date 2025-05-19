@@ -16,7 +16,7 @@
 //   • Supports inserting a 1×1 "dummy" frame referencing the first frame's top-left color.
 //
 // Usage:
-//   gifcat output.gif [-fallback-delay CS] frame0.gif [frame1.gif ...]
+//   gifcat output.gif [-fallback-delay CS] [-D 0-3] frame0.gif [frame1.gif ...]
 //   (use literal "dummy" as input path to append a 1×1 frame with disposal=1 and default delay)
 
 #include <stdio.h>
@@ -264,7 +264,7 @@ static int read_lzw_code(const unsigned char *data, size_t len,
 int main(int argc, char **argv) {
     int ret = 0;
     if (argc < 3) {
-        fprintf(stderr, "Usage: %s output.gif [-fallback-delay CS] frame0.gif [frame1.gif ...]\n", argv[0]);
+        fprintf(stderr, "Usage: %s output.gif [-fallback-delay CS] [-D 0-3] frame0.gif [frame1.gif ...]\n", argv[0]);
         return 1;
     }
     atexit(cleanup_resources);
@@ -273,6 +273,7 @@ int main(int argc, char **argv) {
     if (!outfp) { perror("fopen"); return 1; }
 
     int fallback_delay = DEFAULT_DELAY_CS;
+    int override_disposal = -1;  // Disposal override for next frame only (-D 0-3)
     int max_frames = argc - 2;
     g_disp_arr  = calloc(max_frames, sizeof(int));
     g_local_arr = calloc(max_frames, sizeof(bool));
@@ -285,6 +286,22 @@ int main(int argc, char **argv) {
     int frame_index = 0;
     for (int i = 2; i < argc; i++) {
         const char *path = argv[i];
+
+        // Parse disposal override option
+        if (strcmp(path, "-D") == 0) {
+            if (++i >= argc) {
+                fprintf(stderr, "Missing disposal value for -D\n");
+                return 1;
+            }
+            override_disposal = atoi(argv[i]);
+            if (override_disposal < 0 || override_disposal > 3) {
+                fprintf(stderr, "Invalid disposal value %d for -D; must be 0-3\n", override_disposal);
+                return 1;
+            }
+            continue;
+        }
+        // TODO: Document use of `-D`.
+
         if (strcmp(path, "-fallback-delay") == 0) {
             if (++i >= argc) { fprintf(stderr, "Missing CS value for -fallback-delay\n"); return 1; }
             fallback_delay = atoi(argv[i]);
@@ -357,16 +374,25 @@ int main(int argc, char **argv) {
         bool has_gce = false;
         size_t gce_pos = 0;
         while (p + 1 < buf_size) {
-            if (buf[p]==EXT_INTRODUCER && buf[p+1]==GCE_LABEL) { has_gce = true; gce_pos = p; break; }
-            if (buf[p]==IMAGE_SEPARATOR) break;
-            if (buf[p]==EXT_INTRODUCER) {
-                p += 2; unsigned char sz = buf[p++]; while (sz) { p += sz; sz = buf[p++]; }
-            } else p++;
+            if (buf[p] == EXT_INTRODUCER && buf[p+1] == GCE_LABEL) { has_gce = true; gce_pos = p; break; }
+            if (buf[p] == IMAGE_SEPARATOR) break;
+            if (buf[p] == EXT_INTRODUCER) {
+                p += 2;
+                unsigned char sz = buf[p++];
+                while (sz) { p += sz; sz = buf[p++]; }
+            } else {
+                p++;
+            }
         }
         unsigned char gce_block_size = has_gce ? buf[gce_pos+2] : 4;
         unsigned char orig_flags     = has_gce ? buf[gce_pos+3] : 0;
         int disposal                 = (orig_flags >> DISPOSAL_SHIFT) & (DISPOSAL_MASK >> DISPOSAL_SHIFT);
         if (!disposal) disposal = 1;
+        // Apply disposal override if set
+        if (override_disposal >= 0) {
+            disposal = override_disposal;
+            override_disposal = -1;
+        }
         unsigned int delay           = has_gce ? (buf[gce_pos+4] | (buf[gce_pos+5] << 8)) : DEFAULT_DELAY_CS;
         if (!delay) delay = fallback_delay;
 
