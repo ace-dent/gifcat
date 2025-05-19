@@ -185,25 +185,45 @@ static void write_blocks(FILE *out, const unsigned char *buf,
     }
 }
 
-// Ensure Netscape loop extension is present
+// Ensure exactly one Netscape loop extension block is emitted; copy existing or write new
 static void ensure_loop(FILE *out, const unsigned char *buf,
                         size_t start, size_t end) {
     size_t pos = start;
-    // Scan existing extensions
+    // Scan for an existing Netscape Application Extension block
     while (pos + APP_EXT_BLOCK_SIZE < end) {
-        if (buf[pos]==EXT_INTRODUCER && buf[pos+1]==APPLICATION_EXTENSION_LABEL &&
-            buf[pos+2]==APP_EXT_BLOCK_SIZE &&
-            memcmp(buf+pos+3, NETSCAPE2_HDR, sizeof(NETSCAPE2_HDR))==0)
+        if (buf[pos] == EXT_INTRODUCER && buf[pos+1] == APPLICATION_EXTENSION_LABEL &&
+            buf[pos+2] == APP_EXT_BLOCK_SIZE &&
+            memcmp(buf+pos+3, NETSCAPE2_HDR, APP_EXT_BLOCK_SIZE) == 0) {
+            // Found existing Netscape loop extension; copy it unchanged
+            size_t p = pos;
+            // Copy introducer, label, block size, and application header
+            fwrite(buf + p, 1, 3 + APP_EXT_BLOCK_SIZE, out);
+            p += 3 + APP_EXT_BLOCK_SIZE;
+            // Copy sub-blocks until terminator
+            while (p < end) {
+                unsigned char sz = buf[p++];
+                fwrite(&sz, 1, 1, out);
+                if (sz == 0) break;
+                fwrite(buf + p, 1, sz, out);
+                p += sz;
+            }
             return;
-        if (buf[pos]==IMAGE_SEPARATOR || buf[pos]==TRAILER_BYTE) break;
-        if (buf[pos]==EXT_INTRODUCER) {
+        }
+        if (buf[pos] == IMAGE_SEPARATOR || buf[pos] == TRAILER_BYTE) {
+            // Stop before image data or end of file
+            break;
+        }
+        if (buf[pos] == EXT_INTRODUCER) {
+            // Skip other extensions
             pos += 2;
             unsigned char sz = buf[pos++];
             while (sz) { pos += sz; sz = buf[pos++]; }
-        } else pos++;
+        } else {
+            pos++;
+        }
     }
-    // Write Netscape Application Extension
-    unsigned char header[] = {EXT_INTRODUCER, APPLICATION_EXTENSION_LABEL, APP_EXT_BLOCK_SIZE};
+    // No existing Netscape extension: write a new one with infinite loop
+    unsigned char header[] = { EXT_INTRODUCER, APPLICATION_EXTENSION_LABEL, APP_EXT_BLOCK_SIZE };
     fwrite(header, 1, sizeof(header), out);
     fwrite((unsigned char*)NETSCAPE2_HDR, 1, APP_EXT_BLOCK_SIZE, out);
     unsigned char loop_ext[] = {NETSCAPE_LOOP_SUBBLOCK_SIZE, NETSCAPE_LOOP_SUBBLOCK_ID,
@@ -303,7 +323,7 @@ int main(int argc, char **argv) {
         uint16_t w, h;
         unsigned char *buf = load_file(path, &buf_size, &w, &h);
         if (!buf) return 1;
-        if (i == 2) {
+        if (frame_index == 0) {
             first_width  = w;
             first_height = h;
         } else if (w > first_width || h > first_height) {
@@ -315,8 +335,8 @@ int main(int argc, char **argv) {
 
         size_t palette_bytes;
         unsigned char *palette = extract_palette(buf, buf_size, &palette_bytes);
-        size_t hdr_end = (i == 2 ? 13 + palette_bytes : 13 + first_palette_size);
-        if (i == 2) {
+        size_t hdr_end = (frame_index == 0 ? 13 + palette_bytes : 13 + first_palette_size);
+        if (frame_index == 0) {
             first_palette = palette;
             first_palette_size = palette_bytes;
             fwrite(buf, 1, hdr_end, outfp);
@@ -351,7 +371,7 @@ int main(int argc, char **argv) {
         if (!delay) delay = fallback_delay;
 
         // Determine first-pixel index for reuse
-        if (i == 2 && has_gce) {
+        if (frame_index == 0 && has_gce) {
             int bit_pos = 0;
             size_t data_start = gce_pos + 2 + 1 + gce_block_size + 1;
             unsigned char *data = NULL;
